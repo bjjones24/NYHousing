@@ -1,0 +1,219 @@
+"""
+Name: Ben Jones
+CS230: Section 230
+Data: NY Housing Market
+URL: https://github.com/bjjones24/NYHousing/new/main
+
+Description:
+This website has multiple functions all based around the New York housing market.
+  - Overview tab with summary stats
+  - Most Expensive tab showing the most expensive properties
+  - Baths & Price Filter tab, able to filter houses by baths and a maximum price
+  - Size vs. Price Scatter tab with a maximum and minimum price filter
+  - Interactive Map tab that allows search for different types of housing
+"""
+
+import streamlit as st                            # [ST4]
+st.set_page_config(page_title="NY Housing Explorer", layout="wide")  # [ST4]
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import pydeck as pdk                              # [MAP]
+
+# ----------------------------
+# [PY3] Caching + error checking function
+@st.cache_data
+def load_data(path):
+    """
+    Load CSV, clean, and return first 100 valid rows.
+    """
+    try:
+        df_full = pd.read_csv(path)
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        st.stop()
+    # [DA1] drop rows missing critical columns; take first 100
+    df = df_full.dropna(subset=["PRICE", "BATH", "PROPERTYSQFT", "TYPE", "LOCALITY"]).head(100)
+    # [DA7] round bathrooms to integer
+    df['BATH'] = df['BATH'].round().astype(int)
+    # [DA9] compute price per square foot
+    df['PRICE_SQFT'] = df['PRICE'] / df['PROPERTYSQFT']
+    return df
+
+FILE_PATH = r"C:\Users\benji\Python\NY-House-Dataset.csv"
+df = load_data(FILE_PATH)
+
+# ----------------------------
+# [DA2] Compute percentiles for outlier filtering & scatter bounds
+price_low, price_high       = df['PRICE'].quantile(0.01), df['PRICE'].quantile(0.99)
+price_sc_low, price_sc_high = df['PRICE'].quantile(0.05), df['PRICE'].quantile(0.95)
+sqft_sc_low, sqft_sc_high   = df['PROPERTYSQFT'].quantile(0.05), df['PROPERTYSQFT'].quantile(0.95)
+
+# ----------------------------
+# [PY4] list comprehension: localities with name length > 5
+long_localities = [loc for loc in df['LOCALITY'].unique() if len(loc) > 5]
+# [PY5] dictionary of counts per locality
+locality_counts = df['LOCALITY'].value_counts().to_dict()
+_ = list(locality_counts.items())
+
+# ----------------------------
+# [PY1,PY2] function with default param and multi-value return
+def get_top_n_with_count(data, n=10):
+    """
+    Return top-n rows by PRICE and total row count.
+    """
+    sorted_df = data.sort_values('PRICE', ascending=False)  # [DA2]
+    top_n_df   = sorted_df.head(n)                          # [DA3]
+    return top_n_df, len(data)
+
+# [PY1] call with default n=10
+default_top, default_count       = get_top_n_with_count(df)
+# [PY1] call with explicit n=5
+custom_top5, custom_count5       = get_top_n_with_count(df, 5)
+
+# ----------------------------
+# [ST1],[ST2],[ST3] Sidebar widgets
+st.sidebar.header("Filters & Queries")
+ptype      = st.sidebar.selectbox("Property Type", df['TYPE'].unique())   # [ST1]
+loc        = st.sidebar.selectbox("Locality", df['LOCALITY'].unique())    # [ST2]
+top_n      = st.sidebar.slider("How Many of the Most Expensive to Show", 1, 50, 10)  # [ST3]
+min_baths  = st.sidebar.number_input("Minimum   Baths", 0, int(df['BATH'].max()), 1)    # [ST3]
+max_price  = st.sidebar.number_input("Maximum Price", 0, int(df['PRICE'].max()), int(df['PRICE'].median()))
+price_range = st.sidebar.slider(
+    "Price Range",
+    int(df['PRICE'].min()), int(df['PRICE'].max()),
+    (int(df['PRICE'].min()), int(df['PRICE'].max()))
+)
+
+# [ST4] Tabs
+tab_overview, tab_topn, tab_filter, tab_scatter, tab_map = st.tabs([
+    "Overview", "Most Expensive", "Baths & Price", "Size vs Price", "Map"
+])
+
+# [DA6] Pivot table for overview
+pivot_avg = df.pivot_table(values='PRICE', index='LOCALITY', aggfunc='mean').round(0)
+
+with tab_overview:
+    st.header("Overview & Summary")
+    st.subheader("Listings per Locality")
+    st.write(locality_counts)
+
+    st.subheader("Localities with Name Length > 5")
+    st.write(long_localities)
+
+    st.subheader("Average Price by Locality")
+    st.dataframe(pivot_avg.rename(columns={'PRICE': 'Avg Price ($)'}))
+
+    st.subheader("Addresses Priced Over $1M")
+    # [DA8]
+    high_addrs = [row['ADDRESS'] for _, row in df.iterrows() if row['PRICE'] > 1_000_000]
+    st.write(high_addrs)
+
+with tab_topn:
+    st.header("💰 Most Expensive Listings")
+    df1, cnt1 = get_top_n_with_count(df, top_n)
+
+    # compute prices in millions for chart
+    prices_m = df1['PRICE'] / 1e6
+
+    # prepare display-only DataFrame
+    df1_disp = df1.copy()
+    df1_disp['PRICE']      = df1_disp['PRICE'].map(lambda x: f"${x:,.0f}")
+    df1_disp['PRICE_SQFT'] = df1_disp['PRICE_SQFT'].map(lambda x: f"${x:,.2f}")
+    df1_disp.insert(0, 'Rank', range(1, len(df1_disp) + 1))  # [DA7]
+
+    st.dataframe(df1_disp[[  # display ranked table
+        'Rank','ADDRESS','TYPE','LOCALITY','BEDS','BATH','PROPERTYSQFT','PRICE','PRICE_SQFT'
+    ]])
+
+    # [CHART1] Horizontal bar chart of top-n prices
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(df1['ADDRESS'], prices_m)
+    ax.set_title("Most Expensive Listings")
+    ax.set_xlabel("Price (Millions USD)")
+    ax.xaxis.set_major_formatter(ticker.StrMethodFormatter("{x:.1f}M"))
+    fig.tight_layout()
+    st.pyplot(fig)
+
+with tab_filter:
+    st.header("Baths & Price Filter")
+    # [DA4] & [DA5]
+    df2 = df[
+        (df['LOCALITY'] == loc) &
+        (df['BATH'] >= min_baths) &
+        (df['PRICE'] <= max_price)
+    ]
+    df2 = df2[(df2['PRICE'] >= price_low) & (df2['PRICE'] <= price_high)]
+    st.write(f"Found {len(df2)} listings.")
+
+    df2_disp = df2[['ADDRESS','PRICE','BATH']].copy()
+    df2_disp['PRICE'] = df2_disp['PRICE'].map(lambda x: f"${x:,.0f}")
+    st.dataframe(df2_disp)
+
+    # — plot price in thousands —
+    prices_k = df2['PRICE'] / 1e3
+
+    # [CHART2] Histogram of prices in thousands
+    fig2, ax2 = plt.subplots(figsize=(8, 4))
+    ax2.hist(prices_k, bins=20)
+    ax2.set_xlabel("Price (Thousands USD)")
+    ax2.set_ylabel("Count")
+    ax2.set_title("Price Distribution (in Thousands)")
+    ax2.xaxis.set_major_formatter(ticker.StrMethodFormatter("{x:.0f}K"))
+    fig2.tight_layout()
+    st.pyplot(fig2)
+
+with tab_scatter:
+    st.header("Size vs. Price Scatter (Narrowed axes)")
+    df3 = df[
+        (df['PRICE'] >= price_range[0]) &
+        (df['PRICE'] <= price_range[1]) &
+        (df['PRICE'] >= price_sc_low) &
+        (df['PRICE'] <= price_sc_high) &
+        (df['PROPERTYSQFT'] >= sqft_sc_low) &
+        (df['PROPERTYSQFT'] <= sqft_sc_high)
+    ]
+    st.write(f"Showing {len(df3)} listings within bounds.")
+    fig3, ax3 = plt.subplots()
+    ax3.scatter(df3['PROPERTYSQFT'], df3['PRICE'], alpha=0.7)
+    ax3.set_xlim(0, sqft_sc_high)
+    ax3.set_ylim(0, price_sc_high)
+    ax3.set_xlabel("Square Feet")
+    ax3.set_ylabel("Price ($)")
+    ax3.set_title("Sale Price vs. Property Size")
+    ax3.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
+    ax3.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+    st.pyplot(fig3)
+
+with tab_map:
+    st.header("Map of Listings")
+    # filter by selected property type
+    filtered_map = df[df['TYPE'] == ptype]
+    map_df = filtered_map[['LATITUDE','LONGITUDE','PRICE','ADDRESS']].rename(
+        columns={'LATITUDE': 'lat', 'LONGITUDE': 'lon'}
+    )
+    # [MAP] PyDeck ScatterplotLayer with dots, custom color, radius, and hover tooltip
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=map_df,
+        get_position="[lon, lat]",
+        get_color="[200, 30, 0, 160]",
+        get_radius=200,
+        pickable=True
+    )
+    view_state = pdk.ViewState(
+        latitude=map_df['lat'].mean(),
+        longitude=map_df['lon'].mean(),
+        zoom=10
+    )
+    tooltip = {
+        "html": "<b>Address:</b> {ADDRESS}<br/><b>Price:</b> ${PRICE}",
+        "style": {"backgroundColor": "steelblue", "color": "white"}
+    }
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip=tooltip
+    )
+    st.pydeck_chart(deck)
